@@ -10,9 +10,8 @@ from pyspark.sql.types import (
 )
 
 KAFKA_SERVERS = "localhost:9092"
-TOPIC = "morph.transactions"
-
-CHECKPOINT = "/tmp/morph-spark-kafka-checkpoint"
+TOPIC = "morph.transactions.v2"
+CHECKPOINT = "/tmp/morph-spark-kafka-checkpoint-v2"
 
 transaction_schema = StructType([
     StructField("step", IntegerType(), True),
