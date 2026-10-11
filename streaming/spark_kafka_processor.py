@@ -8,6 +8,7 @@ from pyspark.sql.types import (
     IntegerType,
     DoubleType,
 )
+from pyspark.sql.functions import col
 
 KAFKA_SERVERS = "localhost:9092"
 TOPIC = "morph.transactions.v2"
@@ -109,18 +110,24 @@ def main():
     )
 
     # Reject malformed JSON and events without identifiers.
-    identified_stream = parsed_stream.filter(
-        col("transaction").isNotNull()
-        & col("transaction.event_id").isNotNull()
-        & (col("transaction.event_id") != "")
+    
+
+    identified_stream = (
+        parsed_stream
+        .withColumn("event_id", col("transaction.event_id"))
+        .filter(
+            col("transaction").isNotNull()
+            & col("event_id").isNotNull()
+            & (col("event_id") != "")
+        )
     )
 
-    # Keep deduplication state bounded by the watermark.
     deduplicated_stream = (
         identified_stream
         .withWatermark("event_time", "10 minutes")
-        .dropDuplicatesWithinWatermark(["transaction.event_id"])
+        .dropDuplicatesWithinWatermark(["event_id"])
     )
+
 
     query = (
         deduplicated_stream.writeStream
