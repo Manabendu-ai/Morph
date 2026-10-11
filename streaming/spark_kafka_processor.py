@@ -14,6 +14,7 @@ TOPIC = "morph.transactions.v2"
 CHECKPOINT = "/tmp/morph-spark-kafka-checkpoint-v2"
 
 transaction_schema = StructType([
+    StructField("event_id", StringType(), True),
     StructField("step", IntegerType(), True),
     StructField("type", StringType(), True),
     StructField("amount", DoubleType(), True),
