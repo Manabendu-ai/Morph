@@ -1,9 +1,9 @@
 
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 
-# Project root: the parent of the ingestion directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DATASET_PATH = (
@@ -12,6 +12,12 @@ DATASET_PATH = (
     / "raw"
     / "PS_20174392719_1491204439457_log.csv"
 )
+
+OUTPUT_DIR = PROJECT_ROOT / "data" / "processed"
+
+CLEAN_PATH = OUTPUT_DIR / "transactions_clean.csv"
+REJECTED_PATH = OUTPUT_DIR / "transactions_rejected.csv"
+REPORT_PATH = OUTPUT_DIR / "quality_report.json"
 
 REQUIRED_COLUMNS = {
     "step",
@@ -27,36 +33,103 @@ REQUIRED_COLUMNS = {
     "isFlaggedFraud",
 }
 
+NUMERIC_COLUMNS = {
+    "step",
+    "amount",
+    "oldbalanceOrg",
+    "newbalanceOrig",
+    "oldbalanceDest",
+    "newbalanceDest",
+    "isFraud",
+    "isFlaggedFraud",
+}
 
-def inspect_dataset():
+
+def validate_transaction(row):
+    """Return a rejection reason, or None for a valid record."""
+
+    for column in REQUIRED_COLUMNS:
+        value = row.get(column)
+
+        if value is None or not value.strip():
+            return f"Missing value: {column}"
+
+    try:
+        step = int(row["step"])
+        amount = float(row["amount"])
+
+        old_origin = float(row["oldbalanceOrg"])
+        new_origin = float(row["newbalanceOrig"])
+        old_dest = float(row["oldbalanceDest"])
+        new_dest = float(row["newbalanceDest"])
+
+        fraud = int(row["isFraud"])
+        flagged = int(row["isFlaggedFraud"])
+
+        numeric_values = [
+            amount, old_origin, new_origin, old_dest, new_dest
+        ]
+
+        # Reject NaN and infinity.
+        import math
+        if not all(math.isfinite(value) for value in numeric_values):
+            return "Non-finite numeric value"
+
+        if step < 0:
+            return "Negative transaction step"
+
+        if amount < 0:
+            return "Negative transaction amount"
+
+        if min(old_origin, new_origin, old_dest, new_dest) < 0:
+            return "Negative account balance"
+
+        if fraud not in (0, 1) or flagged not in (0, 1):
+            return "Invalid fraud flag"
+
+        if not row["type"].strip():
+            return "Missing transaction type"
+
+    except (ValueError, TypeError, OverflowError):
+        return "Invalid numeric field"
+
+    return None
+
+
+def process_dataset():
     if not DATASET_PATH.exists():
         raise FileNotFoundError(
-            f"Dataset not found: {DATASET_PATH}\n"
-            "Download PaySim and place its CSV in data/raw/."
+            f"Dataset not found: {DATASET_PATH}"
         )
 
-    transaction_types = Counter()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    total = 0
+    valid = 0
+    rejected = 0
     fraud_counts = Counter()
-
-    total_rows = 0
-    invalid_rows = 0
-    missing_values = 0
+    transaction_types = Counter()
+    rejection_reasons = Counter()
     total_amount = 0.0
-    max_amount = 0.0
 
-    print("MORPH | Transaction Ingestion")
-    print("=" * 50)
-    print(f"Dataset: {DATASET_PATH.name}")
-    print("Reading transactions...")
+    print("MORPH | Data Ingestion and Quality Pipeline")
+    print("=" * 55)
 
-    # Read incrementally instead of loading millions of rows at once.
-    with DATASET_PATH.open(
-        "r", newline="", encoding="utf-8-sig"
-    ) as file:
-        reader = csv.DictReader(file)
+    with (
+        DATASET_PATH.open(
+            "r", newline="", encoding="utf-8-sig"
+        ) as source,
+        CLEAN_PATH.open(
+            "w", newline="", encoding="utf-8"
+        ) as clean_file,
+        REJECTED_PATH.open(
+            "w", newline="", encoding="utf-8"
+        ) as rejected_file,
+    ):
+        reader = csv.DictReader(source)
 
-        if reader.fieldnames is None:
-            raise ValueError("The CSV file has no header.")
+        if not reader.fieldnames:
+            raise ValueError("CSV file has no header")
 
         missing_columns = REQUIRED_COLUMNS - set(reader.fieldnames)
 
@@ -65,74 +138,74 @@ def inspect_dataset():
                 f"Missing required columns: {sorted(missing_columns)}"
             )
 
+        clean_writer = csv.DictWriter(
+            clean_file,
+            fieldnames=reader.fieldnames,
+        )
+        clean_writer.writeheader()
+
+        rejected_writer = csv.DictWriter(
+            rejected_file,
+            fieldnames=reader.fieldnames + ["rejection_reason"],
+        )
+        rejected_writer.writeheader()
+
         for row in reader:
-            total_rows += 1
+            total += 1
+            reason = validate_transaction(row)
 
-            if any(
-                row.get(column) is None
-                or row[column].strip() == ""
-                for column in REQUIRED_COLUMNS
-            ):
-                missing_values += 1
-                invalid_rows += 1
+            if reason:
+                rejected += 1
+                rejection_reasons[reason] += 1
+
+                rejected_writer.writerow({
+                    **row,
+                    "rejection_reason": reason,
+                })
                 continue
 
-            try:
-                amount = float(row["amount"])
-                int(row["step"])
-                float(row["oldbalanceOrg"])
-                float(row["newbalanceOrig"])
-                float(row["oldbalanceDest"])
-                float(row["newbalanceDest"])
+            clean_writer.writerow(row)
+            valid += 1
 
-                fraud = int(row["isFraud"])
-                flagged = int(row["isFlaggedFraud"])
-
-                if (
-                    amount < 0
-                    or fraud not in (0, 1)
-                    or flagged not in (0, 1)
-                ):
-                    invalid_rows += 1
-                    continue
-
-            except (ValueError, TypeError):
-                invalid_rows += 1
-                continue
-
+            fraud_counts[int(row["isFraud"])] += 1
             transaction_types[row["type"]] += 1
-            fraud_counts[fraud] += 1
-            total_amount += amount
-            max_amount = max(max_amount, amount)
+            total_amount += float(row["amount"])
 
-            if total_rows % 1_000_000 == 0:
-                print(f"Scanned {total_rows:,} records...")
+            if total % 1_000_000 == 0:
+                print(f"Processed {total:,} records")
 
-    valid_rows = sum(fraud_counts.values())
+    report = {
+        "source_file": DATASET_PATH.name,
+        "total_records": total,
+        "valid_records": valid,
+        "rejected_records": rejected,
+        "rejection_reasons": dict(rejection_reasons),
+        "fraud_distribution": {
+            "legitimate": fraud_counts[0],
+            "fraud": fraud_counts[1],
+        },
+        "transaction_types": dict(transaction_types),
+        "valid_transaction_amount_total": round(total_amount, 2),
+        "data_quality_percentage": round(
+            valid / total * 100, 4
+        ) if total else 0,
+    }
 
-    print("\nINGESTION SUMMARY")
-    print("-" * 50)
-    print(f"Total records scanned : {total_rows:,}")
-    print(f"Valid records         : {valid_rows:,}")
-    print(f"Invalid records       : {invalid_rows:,}")
-    print(f"Records with missing values: {missing_values:,}")
+    REPORT_PATH.write_text(
+        json.dumps(report, indent=4),
+        encoding="utf-8",
+    )
 
-    print("\nTRANSACTION TYPES")
-    for transaction_type, count in transaction_types.most_common():
-        print(f"{transaction_type:15} {count:>12,}")
-
-    print("\nFRAUD DISTRIBUTION")
-    print(f"Legitimate transactions: {fraud_counts[0]:,}")
-    print(f"Fraud transactions     : {fraud_counts[1]:,}")
-
-    if valid_rows:
-        print("\nTRANSACTION STATISTICS")
-        print(f"Total transaction amount: {total_amount:,.2f}")
-        print(f"Average amount          : {total_amount / valid_rows:,.2f}")
-        print(f"Largest amount          : {max_amount:,.2f}")
-
-    print("\nMORPH ingestion inspection completed.")
+    print("\nMORPH INGESTION COMPLETED")
+    print("=" * 55)
+    print(f"Total records    : {total:,}")
+    print(f"Valid records    : {valid:,}")
+    print(f"Rejected records : {rejected:,}")
+    print(f"Quality score    : {report['data_quality_percentage']}%")
+    print(f"Clean data       : {CLEAN_PATH}")
+    print(f"Rejected data    : {REJECTED_PATH}")
+    print(f"Quality report   : {REPORT_PATH}")
 
 
 if __name__ == "__main__":
-    inspect_dataset()
+    process_dataset()
