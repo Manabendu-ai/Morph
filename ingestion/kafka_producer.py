@@ -3,7 +3,7 @@ import csv
 import json
 import time
 from pathlib import Path
-
+import hashlib
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
@@ -11,8 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data/processed/transactions_clean.csv"
 
 BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "morph.transactions"
-
+TOPIC = "morph.transactions.v2"
 # Start small. Increase only after successful verification.
 MAX_MESSAGES = 1_000
 MESSAGES_PER_SECOND = 100
