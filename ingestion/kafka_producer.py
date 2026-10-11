@@ -68,22 +68,33 @@ def main():
         ) as file:
             reader = csv.DictReader(file)
 
-            for row in reader:
+            
+            for row_number, row in enumerate(reader, start=1):
                 if sent >= MAX_MESSAGES:
                     break
 
                 event = convert_transaction(row)
 
-                # Use the origin account as the Kafka message key.
+                # Stable ID for this record in this source dataset.
+                canonical_row = json.dumps(
+                    row,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+
+                identity = f"{row_number}:{canonical_row}"
+
+                event["event_id"] = hashlib.sha256(
+                    identity.encode("utf-8")
+                ).hexdigest()
+
                 future = producer.send(
                     TOPIC,
                     key=event["nameOrig"],
                     value=event,
                 )
 
-                # Wait for broker acknowledgement.
                 metadata = future.get(timeout=30)
-
                 sent += 1
 
                 if sent % 100 == 0:
@@ -93,12 +104,12 @@ def main():
                         f"offset={metadata.offset}"
                     )
 
-                # Throttle the initial test to approximately 100/sec.
-                target_elapsed = sent * interval
+                target_elapsed = sent / MESSAGES_PER_SECOND
                 elapsed = time.monotonic() - started
 
                 if target_elapsed > elapsed:
                     time.sleep(target_elapsed - elapsed)
+
 
         producer.flush()
 
