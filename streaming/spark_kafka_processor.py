@@ -99,21 +99,38 @@ def main():
         .load()
     )
 
+    
     parsed_stream = raw_stream.select(
+        col("timestamp").alias("event_time"),
         from_json(
             col("value").cast("string"),
             transaction_schema,
-        ).alias("transaction")
+        ).alias("transaction"),
+    )
+
+    # Reject malformed JSON and events without identifiers.
+    identified_stream = parsed_stream.filter(
+        col("transaction").isNotNull()
+        & col("transaction.event_id").isNotNull()
+        & (col("transaction.event_id") != "")
+    )
+
+    # Keep deduplication state bounded by the watermark.
+    deduplicated_stream = (
+        identified_stream
+        .withWatermark("event_time", "10 minutes")
+        .dropDuplicatesWithinWatermark(["transaction.event_id"])
     )
 
     query = (
-        parsed_stream.writeStream
+        deduplicated_stream.writeStream
         .foreachBatch(process_batch)
         .outputMode("append")
         .option("checkpointLocation", CHECKPOINT)
         .trigger(processingTime="5 seconds")
         .start()
     )
+
 
     try:
         query.awaitTermination()
